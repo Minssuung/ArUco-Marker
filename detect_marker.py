@@ -1,54 +1,71 @@
 import cv2
 import cv2.aruco as aruco
+import numpy as np
+import os
+
+# 리눅스 GStreamer 충돌(Segmentation fault) 방지를 위해 환경변수 설정
+os.environ["OPENCV_VIDEOIO_PRIORITY_GSTREAMER"] = "0"
 
 def main():
-    # 생성할 때 사용했던 것과 동일한 사전(Dictionary) 세팅
     dictionary = aruco.getPredefinedDictionary(aruco.DICT_6X6_250)
-    parameters = aruco.DetectorParameters()
+    parameters = aruco.DetectorParameters_create()
 
-    # 웹캠 켜기 (리눅스 기준 기본 카메라 디바이스는 0번 /dev/video0)
-    print("웹캠을 켭니다... (화면 창을 클릭하고 'q'를 누르면 종료됩니다)")
+    # 인쇄된 마커의 실제 크기 (단위: 미터). 예: 5cm 다면 0.05
+    # 정확한 거리를 원하시면 자로 재서 수정하세요.
+    marker_length_meters = 0.05
+
+    print("웹캠을 웁니다... (화면 창을 클릭하고 'q'를 누르면 종료됩니다)")
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
-        print("에러: 카메라를 열 수 없습니다. 카메라가 리눅스에 잘 연결되어 있는지 확인해주세요.")
+        print("에러: 카메라를 열 수 없습니다.")
         return
+
+    # 카메라 내부 파라미터(캘리브레이션)를 위한 가상 세팅 설정
+    # 정확한 자세 추정을 위해서는 원래 체스보드를 이용한 카메라 캘리브레이션이 필수지만,
+    # 여기서는 해상도 기준 대략적인 초점 거리로 행렬(Camera Matrix)을 강제 세팅합니다.
+    ret, frame = cap.read()
+    if not ret: return
+    
+    h, w = frame.shape[:2]
+    focal_length = w
+    center = (w/2, h/2)
+    camera_matrix = np.array([
+        [focal_length, 0, center[0]],
+        [0, focal_length, center[1]],
+        [0, 0, 1]
+    ], dtype="double")
+    dist_coeffs = np.zeros((4, 1))  # 렌즈 왜곡은 0으로 가정
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            print("카메라에서 영상을 읽을 수 없습니다.")
-            break
+        if not ret: break
 
-        # RGB 이미지를 흑백으로 변환 (인식률 및 속도 향상)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # 마커 감지 수행
         corners, ids, rejected = aruco.detectMarkers(gray, dictionary, parameters=parameters)
 
-        # 감지된 마커가 있다면 화면에 그리기
         if ids is not None:
             aruco.drawDetectedMarkers(frame, corners, ids)
             
-            # 각 마커의 ID와 중심점 터미널 출력 및 화면 표시
+            # 카메라 파라미터와 마커 실제 크기를 바탕으로 XYZ 좌표와 3D 자세 회전값(rvec) 계산
+            rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(corners, marker_length_meters, camera_matrix, dist_coeffs)
+
             for i in range(len(ids)):
-                c = corners[i][0]
-                center_x = int((c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4)
-                center_y = int((c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4)
-                cv2.circle(frame, (center_x, center_y), 4, (0, 0, 255), -1)
+                # rvecs[i]는 마커의 3D 회전각, tvecs[i]는 카메라로부터의 X,Y,Z 이동 거리 정보입니다.
+                x, y, z = tvecs[i][0]
+
+                # 3D X,Y,Z 축을 마커 위에 시각화 (빨간색:X, 초록색:Y, 파란색:Z축)
+                cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, rvecs[i], tvecs[i], marker_length_meters)
                 
-                # 좌상단에 텍스트로 정보 그리기
-                cv2.putText(frame, f"ID: {ids[i][0]} Center: ({center_x}, {center_y})",
+                # Z 거리 및 ID 표시
+                cv2.putText(frame, f"ID: {ids[i][0]} Z:{z:.2f}m",
                             (10, 30 + i * 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        # 결과 화면 출력
-        cv2.imshow('ArUco Marker Detection', frame)
+        cv2.imshow('ArUco Marker Detection (3D Pose)', frame)
 
-        # 'q' 키를 누르면 종료
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-    # 자원 해제
     cap.release()
     cv2.destroyAllWindows()
 
